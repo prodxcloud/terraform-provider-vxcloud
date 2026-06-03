@@ -16,6 +16,8 @@
 - [Quick Start](#quick-start)
 - [Provider Configuration](#provider-configuration)
 - [Resources](#resources)
+  - [vxcloud_deployment](#vxcloud_deployment)
+  - [vxcloud_agent](#vxcloud_agent)
   - [vxcloud_redis](#vxcloud_redis)
 - [Data Sources](#data-sources)
 - [Authentication](#authentication)
@@ -35,10 +37,11 @@ The **VxCloud Terraform Provider** enables infrastructure-as-code workflows for 
 
 With this provider you can:
 
-- Provision managed **Redis**, **databases**, **compute**, and **Kubernetes** resources on VxCloud
-- Use **GitOps** and **CI/CD pipelines** to drive infrastructure changes
-- Manage resources across **8+ cloud providers** through a unified VxCloud API
-- Enforce **policy-as-code** and compliance guardrails at the infrastructure layer
+- **Deploy apps & containers** onto your VMs over SSH (`vxcloud_deployment`) — image, ports, env, and automatic Let's Encrypt TLS, all as code
+- **Manage AI agents** on AgentControl (`vxcloud_agent`) — name, model, system prompt, and tenant scoping
+- Provision managed **Redis** and other services on VxCloud
+- Drive everything with the **same developer API key** the CLI, SDK, and GitHub Action use
+- Use **GitOps** and **CI/CD pipelines** to deploy across **8+ cloud providers** through a unified API
 
 ---
 
@@ -86,8 +89,10 @@ terraform apply
 
 ```hcl
 provider "vxcloud" {
-  email     = "your@email.com"   # or set VXCLOUD_EMAIL env var
-  api_token = "your-api-token"   # or set VXCLOUD_API_TOKEN env var
+  api_token = "xc_live_xxxxxxxx"        # or set VXCLOUD_API_TOKEN / VXCLOUD_API_KEY
+  endpoint  = "https://node1.vxcloud.io" # tenant node (default)
+  tenant_id = "00000000-..."            # required for vxcloud_agent
+  username  = "you"                      # or set VXCLOUD_USERNAME
 }
 ```
 
@@ -95,14 +100,128 @@ provider "vxcloud" {
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `email` | string | Yes | Your VxCloud account email address |
-| `api_token` | string | Yes | Your VxCloud API token (generate at prodxcloud.com) |
+| `api_token` | string | Yes | Developer API key (`xc_dev_…`/`xc_live_…`), sent as `X-API-Key` |
+| `endpoint` | string | No | Tenant node base URL. Defaults to `https://node1.vxcloud.io` |
+| `tenant_id` | string | No | Tenant id (`X-Tenant-ID`); required for `vxcloud_agent` resources |
+| `username` | string | No | Username (`X-Username`); defaults to `email` |
+| `email` | string | No | Account email; used as `X-Username` fallback |
 
-Credentials are read from the provider block first, then from environment variables `VXCLOUD_EMAIL` and `VXCLOUD_API_TOKEN`.
+Credentials are read from the provider block first, then from the environment
+variables below. The same developer API key the CLI and SDK use (`xc_dev_…` /
+`xc_live_…`) authenticates the provider.
 
 ---
 
 ## Resources
+
+### vxcloud_deployment
+
+Deploys a Docker container/app onto one of your VMs over SSH — the Terraform
+equivalent of `vxcli deploy container`. The provider streams the request to your
+tenant node, which connects to the host using an SSH key-pair stored in your
+VxCloud Vault, pulls the image, and runs the container (optionally fronted by an
+automatic Let's Encrypt reverse-proxy).
+
+#### Example Usage
+
+```hcl
+resource "vxcloud_deployment" "api" {
+  name          = "finance-api"
+  image         = "ghcr.io/your-org/finance-api:latest"
+  host          = "203.0.113.20"
+  ssh_user      = "root"
+  key_pair_name = "prod-ssh-key" # SSH key stored in your VxCloud Vault
+
+  ports = ["80:8000"]
+  env   = ["ENV=production", "LOG_LEVEL=info"]
+
+  enable_ssl = true
+  domain     = "api.example.com"
+  ssl_email  = "ops@example.com"
+}
+
+output "session_id" {
+  value = vxcloud_deployment.api.session_id
+}
+```
+
+#### Argument Reference
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Container name on the target host (forces replacement) |
+| `image` | string | Yes | Docker image to run (e.g. `redis:7`, `ghcr.io/acme/api:1.2`) |
+| `host` | string | Yes | Target VM IP/hostname (forces replacement) |
+| `ssh_user` | string | Yes | SSH user on the VM (e.g. `ubuntu`, `root`) |
+| `key_pair_name` | string | Yes | Name of the SSH key-pair stored in your VxCloud Vault |
+| `ports` | list(string) | No | Port mappings `host:container` (e.g. `["80:8000"]`) |
+| `env` | list(string) | No | Environment variables as `KEY=VALUE` strings |
+| `restart_policy` | string | No | Docker restart policy (default `unless-stopped`) |
+| `network` | string | No | Docker network to attach to |
+| `command` | string | No | Override the container's default command |
+| `enable_ssl` | bool | No | Provision Let's Encrypt TLS + reverse-proxy (default `false`) |
+| `domain` | string | No | Public domain to route (required when `enable_ssl = true`) |
+| `ssl_email` | string | No | Let's Encrypt email (required when `enable_ssl = true`) |
+
+#### Attribute Reference
+
+| Attribute | Type | Description |
+|---|---|---|
+| `id` | string | Deployment identifier (the container name) |
+| `session_id` | string | Deploy session id from the platform (for log streaming) |
+
+> **Note:** `key_pair_name` must reference a key-pair already stored in your
+> VxCloud Vault — the deploy endpoint requires the server-side credential and
+> does not accept an inline private key. `terraform destroy` makes a best-effort
+> call to stop and remove the container on the host.
+
+---
+
+### vxcloud_agent
+
+Manages an **AgentControl** agent — the Terraform equivalent of
+`vxcli agentcontrol agent create`. Requires a `tenant_id` (sent as `X-Tenant-ID`),
+set on the provider block or overridden per-resource.
+
+#### Example Usage
+
+```hcl
+resource "vxcloud_agent" "compliance_copilot" {
+  name        = "compliance-copilot"
+  agent_type  = "rag"
+  model       = "compliancellm"
+  description = "FinTech compliance Q&A over policy documents."
+
+  system_prompt = <<-EOT
+    You are a FinTech compliance assistant. Answer only from the retrieved
+    policy context, cite the source section, and say "not in policy" when the
+    context does not cover the question.
+  EOT
+}
+
+output "agent_id" {
+  value = vxcloud_agent.compliance_copilot.id
+}
+```
+
+#### Argument Reference
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Human-readable agent name |
+| `agent_type` | string | No | Agent kind (e.g. `assistant`, `rag`, `tool-calling`) |
+| `model` | string | No | Backing model id (a deployed model or vxthinkingllm SLM) |
+| `description` | string | No | What the agent does |
+| `system_prompt` | string | No | System prompt defining the agent's behavior |
+| `tenant_id` | string | No | Override the provider-level tenant id (forces replacement) |
+
+#### Attribute Reference
+
+| Attribute | Type | Description |
+|---|---|---|
+| `id` | string | AgentControl agent id assigned by the platform |
+
+---
 
 ### vxcloud_redis
 
@@ -158,20 +277,23 @@ Data sources are coming in a future release. Track progress on the [issues page]
 
 ## Authentication
 
-The provider supports two authentication methods (evaluated in order):
+The provider authenticates with your **developer API key** (`xc_dev_…` for dev,
+`xc_live_…` for production), sent as the `X-API-Key` header — the same key the
+CLI (`vxcli auth login -k`), SDK, and GitHub Action use. Credentials are
+evaluated in order:
 
 **1. Static credentials (provider block)**
 ```hcl
 provider "vxcloud" {
-  email     = "user@example.com"
-  api_token = "vxc_xxxxxxxxxxxx"
+  api_token = "xc_live_xxxxxxxxxxxx"
+  tenant_id = "00000000-..."   # only needed for vxcloud_agent
 }
 ```
 
 **2. Environment variables** *(recommended for CI/CD)*
 ```bash
-export VXCLOUD_EMAIL="user@example.com"
-export VXCLOUD_API_TOKEN="vxc_xxxxxxxxxxxx"
+export VXCLOUD_API_KEY="xc_live_xxxxxxxxxxxx"
+export VXCLOUD_TENANT_ID="00000000-..."   # only needed for vxcloud_agent
 ```
 
 > **Security tip:** Never commit API tokens to source control. Use environment variables, Vault, or a secrets manager in production pipelines.
@@ -182,8 +304,12 @@ export VXCLOUD_API_TOKEN="vxc_xxxxxxxxxxxx"
 
 | Variable | Description |
 |---|---|
-| `VXCLOUD_EMAIL` | Account email (overrides provider block `email`) |
-| `VXCLOUD_API_TOKEN` | API token (overrides provider block `api_token`) |
+| `VXCLOUD_API_TOKEN` | Developer API key (sent as `X-API-Key`) |
+| `VXCLOUD_API_KEY` | Alias for `VXCLOUD_API_TOKEN` (matches the CLI/Action) |
+| `VXCLOUD_ENDPOINT` | Tenant node base URL (default `https://node1.vxcloud.io`) |
+| `VXCLOUD_TENANT_ID` | Tenant id for agentcontrol (`X-Tenant-ID`) |
+| `VXCLOUD_USERNAME` | Username for agentcontrol (`X-Username`) |
+| `VXCLOUD_EMAIL` | Account email (used as `X-Username` fallback) |
 
 ---
 
@@ -374,11 +500,15 @@ terraform-provider-vxcloud/
 ├── internal/
 │   └── provider/
 │       ├── provider.go            # Provider schema & configuration
-│       ├── client.go              # VxCloud API client
+│       ├── client.go              # VxCloud tenant-node API client
+│       ├── deployment_resource.go # vxcloud_deployment resource
+│       ├── agent_resource.go      # vxcloud_agent (agentcontrol) resource
 │       └── redis_resource.go      # vxcloud_redis resource
 ├── examples/
-│   ├── provider/                  # Provider usage examples
-│   └── resources/vxcloud_redis/   # Redis resource examples
+│   ├── provider/                       # Provider usage examples
+│   ├── resources/vxcloud_deployment/   # Container deploy examples
+│   ├── resources/vxcloud_agent/        # AgentControl agent examples
+│   └── resources/vxcloud_redis/        # Redis resource examples
 ├── Makefile                       # Build, test, and release targets
 ├── go.mod                         # Go module definition
 └── terraform-registry-manifest.json

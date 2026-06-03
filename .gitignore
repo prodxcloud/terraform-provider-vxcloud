@@ -1,0 +1,29 @@
+# Compiled provider binaries
+terraform-provider-vxcloud
+terraform-provider-vxcloud.exe
+*.dll
+*.so
+*.dylib
+
+# GoReleaser build output
+dist/
+
+# Terraform working files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Local credentials / keys — never commit
+*.pem
+*.asc
+*.gpg
+secring.*
+.terraformrc
+terraform.rc
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

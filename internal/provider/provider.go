@@ -21,6 +21,8 @@ type VxCloudProviderModel struct {
 	Email    types.String `tfsdk:"email"`
 	APIToken types.String `tfsdk:"api_token"`
 	Endpoint types.String `tfsdk:"endpoint"`
+	TenantID types.String `tfsdk:"tenant_id"`
+	Username types.String `tfsdk:"username"`
 }
 
 func (p *VxCloudProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -37,12 +39,20 @@ func (p *VxCloudProvider) Schema(_ context.Context, _ provider.SchemaRequest, re
 				Optional:    true,
 			},
 			"api_token": schema.StringAttribute{
-				Description: "API token for the vxcloud API. May also be set via VXCLOUD_API_TOKEN.",
+				Description: "Developer API key (xc_dev_/xc_live_) sent as X-API-Key. May also be set via VXCLOUD_API_TOKEN or VXCLOUD_API_KEY.",
 				Optional:    true,
 				Sensitive:   true,
 			},
 			"endpoint": schema.StringAttribute{
-				Description: "Override the vxcloud API endpoint. Defaults to https://api.vxcloud.com.",
+				Description: "Tenant node base URL where deploys and agentcontrol run. Defaults to https://node1.vxcloud.io. May also be set via VXCLOUD_ENDPOINT.",
+				Optional:    true,
+			},
+			"tenant_id": schema.StringAttribute{
+				Description: "Tenant id (X-Tenant-ID) for agentcontrol resources. May also be set via VXCLOUD_TENANT_ID.",
+				Optional:    true,
+			},
+			"username": schema.StringAttribute{
+				Description: "Username (X-Username) for agentcontrol resources. Defaults to email. May also be set via VXCLOUD_USERNAME.",
 				Optional:    true,
 			},
 		},
@@ -62,28 +72,53 @@ func (p *VxCloudProvider) Configure(ctx context.Context, req provider.ConfigureR
 	}
 	apiToken := data.APIToken.ValueString()
 	if apiToken == "" {
-		apiToken = os.Getenv("VXCLOUD_API_TOKEN")
+		apiToken = firstEnv("VXCLOUD_API_TOKEN", "VXCLOUD_API_KEY")
 	}
 	endpoint := data.Endpoint.ValueString()
 	if endpoint == "" {
-		endpoint = "https://api.vxcloud.com"
+		endpoint = os.Getenv("VXCLOUD_ENDPOINT")
+	}
+	if endpoint == "" {
+		endpoint = "https://node1.vxcloud.io"
+	}
+	tenantID := data.TenantID.ValueString()
+	if tenantID == "" {
+		tenantID = os.Getenv("VXCLOUD_TENANT_ID")
+	}
+	username := data.Username.ValueString()
+	if username == "" {
+		username = os.Getenv("VXCLOUD_USERNAME")
 	}
 
 	if apiToken == "" {
 		resp.Diagnostics.AddError(
 			"Missing api_token",
-			"Set the api_token attribute or the VXCLOUD_API_TOKEN environment variable.",
+			"Set the api_token attribute or the VXCLOUD_API_TOKEN / VXCLOUD_API_KEY environment variable.",
 		)
 		return
 	}
 
 	client := NewClient(endpoint, email, apiToken)
+	client.TenantID = tenantID
+	client.Username = username
 	resp.DataSourceData = client
 	resp.ResourceData = client
 }
 
+// firstEnv returns the first non-empty environment variable among keys.
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (p *VxCloudProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
+		NewDeploymentResource,
+		NewAgentResource,
 		NewRedisResource,
 	}
 }
